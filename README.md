@@ -57,7 +57,7 @@ Hypixel return for this UUID." Each service parses the raw JSON with its own exi
 
 - **Fetch time timestamps, not TTLs.** Each `Entry.timestamp` is the UTC time the data was
   originally fetched from Hypixel, not "seconds remaining." This lets the receiving side apply
-  *its own* staleness rules instead of trusting the sender's cache policy.
+  its own staleness rules instead of trusting the sender's cache policy.
 
 
 ## Authors
