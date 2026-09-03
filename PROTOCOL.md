@@ -1,8 +1,9 @@
 # Protocol Specification
 
-Transport: a single persistent WebSocket connection. One side (the "client") dials out to the
-other (the "server"); once connected and authenticated, messages flow in both directions and
-either side may initiate a query.
+Transport: a single persistent WebSocket connection. One side (the "client") connects to the
+other (the "server").
+once connected and authenticated, messages flow in both directions and
+both side can query.
 
 All messages are JSON text frames.
 
@@ -16,12 +17,12 @@ All messages are JSON text frames.
 | Client-bound | `Query` | `301` |
 
 "Server-bound" / "client-bound" describe the *roles in a given exchange*, not fixed connection
-roles — since either peer can initiate a query, either peer can send a `300` and either peer can
+roles since either peer can initiate a query, either peer can send a `300` and either peer can
 answer with a `301`.
 
 ## Message shapes
 
-### `In` — a request (Auth or Query)
+### `In` a request (Auth or Query)
 
 ```json
 {
@@ -39,7 +40,7 @@ answer with a `301`.
 | `token` | string? | Shared secret, only sent with `Auth` |
 | `uuids` | string[]? | UUIDs being requested, only sent with `Query`. Dashed or undashed — normalize on receipt. |
 
-### `Out` — a response (Auth ack or Query result)
+### `Out` a response (Auth/Query result)
 
 ```json
 {
@@ -49,7 +50,7 @@ answer with a `301`.
   "error": null,
   "uuids": ["<uuid>", "..."],
   "data": {
-    "<uuid>": { "d": "<encoded payload>", "ts": 1756900000000 }
+    "<uuid>": { "d": "<json string>", "ts": 1756900000000 }
   }
 }
 ```
@@ -58,10 +59,10 @@ answer with a `301`.
 |---|---|---|
 | `t` | int | `200` for Auth ack, `301` for Query result |
 | `id` | string | Must match the `id` of the request being answered |
-| `success` | bool? | Used for Auth (`true`/`false`); may also be set on Query responses |
-| `error` | string? | Human-readable error, e.g. `"Unauthorized"` |
+| `success` | bool? | Used for Auth (`true`/`false`) |
+| `error` | string? | Human-readable error |
 | `uuids` | string[]? | Echo of the requested UUIDs (Query only) |
-| `data` | map<string, Entry>? | UUIDs that were found in cache. **Absence of a UUID means a cache miss** — there is no explicit "not found" entry per UUID. |
+| `data` | map<string, Entry>? | UUIDs that were found in cache. **Absence of a UUID means a cache miss** |
 
 ### `Entry`
 
@@ -69,10 +70,10 @@ answer with a `301`.
 { "d": "<string>", "ts": 1756900000000 }
 ```
 
-| Field | Type | Notes |
-|---|---|---|
-| `d` | string | The cached payload — see [Payload encoding](#payload-encoding) below |
-| `ts` | long | **UTC epoch milliseconds of when the underlying Hypixel data was originally fetched** — not a TTL, not "time cached," not "seconds remaining." |
+| Field | Type | Notes                                                                                                                        |
+|---|---|------------------------------------------------------------------------------------------------------------------------------|
+| `d` | string | The cached payload.                                                           |
+| `ts` | long | **UTC time of when the data was originally fetched** |
 
 ## Auth flow
 
@@ -86,8 +87,6 @@ answer with a `301`.
 4. Client waits (with a timeout) for the `200` response correlated by `id` before treating the
    connection as usable.
 
-Auth happens once per connection, immediately after connect — there's no re-auth mid-session.
-
 ## Query flow
 
 1. Requester sends `In { t: 300, id, uuids: [...] }`.
@@ -98,48 +97,13 @@ Auth happens once per connection, immediately after connect — there's no re-au
 4. Requester resolves the pending request keyed by `id` and applies its own staleness check (see
    below) to each returned `Entry` before trusting it.
 
-Either peer can be the requester — the same handler code processes an incoming `300` regardless
+Either peer can be the requester. the same handler code processes an incoming `300` regardless
 of who established the connection.
-
-## Payload encoding
-
-`Entry.d` carries the underlying Hypixel API response, compressed. In this implementation:
-
-- Payloads are compressed with **zstd**.
-- The compressed bytes may be sent **base64-encoded**, or in some paths as a raw string,
-  depending on which side produced them — decoders should be tolerant of both:
-  1. If the string starts with `{` (i.e. looks like plain JSON already), treat it as
-     uncompressed JSON directly.
-  2. Otherwise, base64-decode, then zstd-decompress, to recover the original JSON string.
-- Zstd frames produced with the standard encoder embed the original content size in the frame
-  header, so decoders can read it back (e.g. `Zstd.getFrameContentSize(...)`) rather than
-  needing to know the size out-of-band.
-
-## Staleness / TTL semantics
-
-`Entry.timestamp` is **fetch time**, not remaining TTL. This is intentional: the two sides don't
-necessarily use the same cache duration, so trusting "the sender thinks this is still fresh"
-would let one side's TTL policy silently leak into the other's. Instead, each side computes:
-
-```
-age = now_utc_ms - entry.timestamp
-```
-
-and compares `age` against its **own** configured cache TTL before deciding whether to actually
-use the peer's data or treat it as a miss and fall through to a direct Hypixel fetch.
-
-To compute a `timestamp` from a Redis key's remaining TTL (rather than storing fetch time
-separately):
-
-```
-fetched_at = now_utc_ms - ((total_ttl_seconds - redis.ttl(key)) * 1000)
-```
 
 ## Connection lifecycle
 
-- The client is responsible for dialing out and reconnecting; the server only accepts.
+- The client is responsible for dialing out and reconnecting. the server only accepts.
 - On disconnect (auth failure, network error, server restart, etc.), the client retries with
   **exponential backoff + jitter**, capped at a maximum delay (e.g. 30s), to avoid hammering a
   down or misbehaving peer.
-- A query that doesn't get a correlated response within a timeout (e.g. 1–6s depending on side)
-  is treated as a miss — the requester falls through to its normal (non-partner) cache-miss path.
+ - A query that doesn't get a response within a timeout is treated as a miss.

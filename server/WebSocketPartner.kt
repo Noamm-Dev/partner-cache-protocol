@@ -109,15 +109,6 @@ object WebSocketPartner {
         return runCatching { json.decodeFromString<WebSocketPartnerPacket.In>(frame.readText()) }.getOrNull()
     }
 
-    private fun entry(entry: WebSocketPartnerPacket.Entry): HypixelRawPlayerDatabase.RawEntry {
-        val source = entry.data
-        val data =
-            if (source.trimStart().startsWith("{")) CompressionUtil.compress(source.toByteArray(Charsets.UTF_8), 3)
-            else runCatching { Base64.getDecoder().decode(source) }.getOrElse { CompressionUtil.compress(source.toByteArray(Charsets.UTF_8), 3) }
-
-        return HypixelRawPlayerDatabase.RawEntry(data, entry.timestamp)
-    }
-
     private suspend fun out(session: WebSocketServerSession, msg: WebSocketPartnerPacket.Out) {
         try {
             session.send(Frame.Text(json.encodeToString(msg)))
