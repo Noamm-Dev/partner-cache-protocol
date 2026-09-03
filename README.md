@@ -44,10 +44,11 @@ Full wire format and semantics are documented in [`PROTOCOL.md`](./PROTOCOL.md).
 ```
 server/    Server-side implementation (accepts the incoming WebSocket and handles auth and sends/answers queries)
 client/    Client-side implementation (connects to the server side, authenticates and sends/answers queries)
+example.kt a simple example usage
 PROTOCOL.md  Wire protocol specification
 ```
 
-## design decisions
+## Design decisions
 
 - **Raw response caching, not formatted output.** Lets both sides parse independently.
 Caching the **raw** response from Hypixel means the two sides don't need to agree on data shape, only on "what did
@@ -59,7 +60,7 @@ Hypixel return for this UUID." Each service parses the raw JSON with its own exi
   *its own* staleness rules instead of trusting the sender's cache policy.
 
 
-## authors
+## Authors
 
 - [Noamm9](https://github.com/Noamm9): client implementation, protocol co-design
 - [skies-starred](https://github.com/skies-starred): server implementation, protocol co-design
