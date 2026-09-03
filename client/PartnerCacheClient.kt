@@ -126,7 +126,7 @@ object PartnerCacheClient {
         val currentSession = session
         if (currentSession == null || !authenticated || uuids.isEmpty()) return emptyMap()
 
-        val requestId = UUID.randomUUID().toString()
+        val requestId = "req_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}"
         val deferred = CompletableDeferred<WebSocketPartnerPacket.Out>()
         pending[requestId] = deferred
 
