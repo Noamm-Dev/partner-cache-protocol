@@ -1,146 +1,132 @@
-package init
+package services.partner
 
-import init.ws.WebSocketPartnerPacket
-import init.ws.WebSocketPartnerRegistry
+import NoammApi
+import events.HypixelEvent
+import init.types.ISelfInit
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.*
 import kotlinx.coroutines.*
-import routes.HypixelRouter
-import services.JsonService.json
+import services.ProfileCacheService
 import services.ProxyService
-import services.RedisService
+import services.partner.WebSocketPartnerPacket.AuthRequest
+import services.partner.WebSocketPartnerPacket.AuthResponse
+import services.partner.WebSocketPartnerPacket.Entry
+import services.partner.WebSocketPartnerPacket.PartnerPacket
+import services.partner.WebSocketPartnerPacket.QueryRequest
+import services.partner.WebSocketPartnerPacket.QueryResponse
 import utils.*
 import java.util.*
 import java.util.concurrent.*
 import kotlin.random.Random
-import kotlin.system.exitProcess
 
-object PartnerCacheClient {
-    private val pending = ConcurrentHashMap<String, CompletableDeferred<WebSocketPartnerPacket.Out>>()
+object PartnerCacheClient: ISelfInit {
+    private val pending = ConcurrentHashMap<String, CompletableDeferred<PartnerPacket>>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val httpClient = ProxyService.defaultClient
+    private const val timeoutMs = 1500L
 
+    // only set once authenticated so a not null session is always authed
     @Volatile private var session: WebSocketSession? = null
-    @Volatile private var authenticated = false
-    fun isConnected() = authenticated
+    fun isConnected() = session != null
 
-    fun connect() = scope.launch {
-        val token = System.getenv("PARTNER_SECRET") ?: run {
-            println("Missing PARTNER_SECRET environment variable")
-            exitProcess(0)
+    override fun init() {
+        if (! NoammApi.isLocal) scope.launch {
+            connectLoop("ws://unstable.starred.foo/ws/partner", env("PARTNER_SECRET"))
         }
-
-        connectLoop("ws://unstable.starred.foo/ws/partner", token)
-    }
-
-    private suspend fun getFetchedTimestamp(key: String): Long? {
-        val ttl = RedisService.ttl(key)?.takeUnless { it < 0 } ?: return null
-        val elapsedSeconds = HypixelRouter.profileCacheTime - ttl
-        return System.currentTimeMillis() - (elapsedSeconds * 1000L)
     }
 
     private suspend fun connectLoop(url: String, token: String) {
         var attempt = 0
 
-        while (scope.isActive) try {
-            val block: suspend WebSocketSession.() -> Unit = block@{
-                session = this
-                authenticated = false
+        while (scope.isActive) {
+            try {
+                httpClient.webSocket(url) {
+                    scope.launch {
+                        delay(1000)
+                        val response = request<AuthResponse>(
+                            AuthRequest(
+                                id = createRequestId(),
+                                token = token
+                            )
+                        )
+                        if (response?.success != true) return@launch NoammApi.LOGGER.error("Partner cache auth failed: ${response?.error ?: "timed out"}")
 
-                scope.launch {
-                    delay(1000)
-                    val authId = UUID.randomUUID().toString()
-                    val authDeferred = CompletableDeferred<WebSocketPartnerPacket.Out>()
-                    pending[authId] = authDeferred
+                        session = this@webSocket
+                        attempt = 0
+                        NoammApi.LOGGER.info("Authenticated with partner cache at $url")
+                    }
 
-                    send(Frame.Text(json.encodeToString((WebSocketPartnerPacket.In(
-                        type = WebSocketPartnerRegistry.ServerBound.Auth.id,
-                        id = authId,
-                        token = token
-                    )))))
-
-                    val authResult = withTimeoutOrNull(5000) { authDeferred.await() }.also { pending.remove(authId) }
-                    if (authResult == null || authResult.success != true) return@launch println("Partner cache auth failed: ${authResult?.error ?: "timed out"}")
-
-                    authenticated = true
-                    attempt = 0
-                    println("Authenticated with partner cache at $url")
-                }
-
-                try {
-                    for (frame in incoming) if (frame is Frame.Text) {
-                        val text = frame.readText()
-                        println("received: ${text.take(200)}")
-
-                        val header = catch { json.decodeFromString<WebSocketPartnerPacket.PacketHeader>(text) } ?: continue
-
-                        when (header.type) {
-                            WebSocketPartnerRegistry.ServerBound.Query.id -> {
-                                val request = catch { json.decodeFromString<WebSocketPartnerPacket.In>(text) } ?: continue
-                                val uuids = request.uuids.orEmpty().map { normalizeUUID(it)!! }
-
-                                val data = uuids.mapNotNull { uuid ->
-                                    val key = "profile:$uuid"
-                                    val cached = RedisService.get(key) ?: return@mapNotNull null
-                                    val ts = getFetchedTimestamp(key) ?: return@mapNotNull null
-                                    uuid to WebSocketPartnerPacket.Entry(data = cached, timestamp = ts)
-                                }.toMap()
-
-                                if (data.isNotEmpty()) println("sending $uuids")
-                                send(Frame.Text(json.encodeToString(WebSocketPartnerPacket.Out(
-                                    type = WebSocketPartnerRegistry.ClientBound.Query.id,
-                                    id = header.id,
-                                    success = true,
-                                    uuids = uuids,
-                                    data = data
-                                ))))
-                            }
-
-                            else -> {
-                                val packet = catch { json.decodeFromString<WebSocketPartnerPacket.Out>(text) } ?: continue
-                                pending.remove(packet.id)?.complete(packet)
+                    try {
+                        for (frame in incoming) if (frame is Frame.Text) {
+                            when (val packet = WebSocketPartnerRegistry.decode(frame.readText())) {
+                                is QueryRequest -> handleQuery(packet)
+                                is AuthResponse, is QueryResponse -> pending.remove(packet.id)?.complete(packet)
+                                is AuthRequest, null -> Unit // client does not auth xd
                             }
                         }
+
+                        NoammApi.LOGGER.info("Partner cache closed: ${closeReason.await()}")
+                    }
+                    finally {
+                        session = null
                     }
                 }
-                finally {
-                    authenticated = false
-                    session = null
-                }
+            }
+            catch (e: Exception) {
+                NoammApi.LOGGER.info("Partner cache disconnected: ${e.message}")
+                session = null
             }
 
-            httpClient.webSocket(url, block = block)
+            attempt ++
+            val backoff = (1000L * (1 shl minOf(attempt, 5))) + Random.nextLong(500)
+            delay(minOf(backoff, 30_000L))
         }
-        catch (e: Exception) {
-            println("Partner cache disconnected: ${e.message}")
-            authenticated = false
-            session = null
-        }
-
-        attempt++
-        val backoff = (1000L * (1 shl minOf(attempt, 5))) + Random.nextLong(500)
-        delay(minOf(backoff, 30_000L))
     }
 
-    suspend fun queryUuids(uuids: List<String>, timeoutMs: Long = 1_000): Map<String, WebSocketPartnerPacket.Entry> {
-        val currentSession = session
-        if (currentSession == null || !authenticated || uuids.isEmpty()) return emptyMap()
+    private suspend fun WebSocketSession.handleQuery(request: QueryRequest) {
+        val uuids = request.uuids.mapNotNull(::normalizeUUID)
+        val oldestAllowed = System.currentTimeMillis() - request.maxAge
+        val data = uuids.mapNotNull { uuid ->
+            ProfileCacheService.get(uuid)?.takeIf { it.timestamp >= oldestAllowed }?.let { uuid to it }
+        }.toMap()
 
-        val requestId = "req_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}"
-        val deferred = CompletableDeferred<WebSocketPartnerPacket.Out>()
-        pending[requestId] = deferred
-
-        currentSession.send(Frame.Text(json.encodeToString(WebSocketPartnerPacket.In(
-            type = WebSocketPartnerRegistry.ServerBound.Query.id,
-            id = requestId,
-            uuids = uuids.map { dashedUUID(it)!! }
-        ))))
-
-        val result = withTimeoutOrNull(timeoutMs) { deferred.await() }
-        pending.remove(requestId)
-
-        return (result?.data ?: emptyMap()).mapKeys { normalizeUUID(it.key)!! }
+        send(QueryResponse(id = request.id, success = true, uuids = uuids, data = data))
+        if (data.isNotEmpty()) NoammApi.eventBus.postAsync(HypixelEvent.PartnerServed(data.size))
     }
 
-    suspend fun queryUuid(uuid: String, timeoutMs: Long = 1_000) = queryUuids(listOf(uuid), timeoutMs)[normalizeUUID(uuid)]
+    suspend fun queryUuids(uuids: List<String>, maxAge: Long = ProfileCacheService.maxAge): Map<String, Entry> {
+        if (uuids.isEmpty()) return emptyMap()
+        val currentSession = session ?: return emptyMap()
+
+        val response = currentSession.request<QueryResponse>(
+            QueryRequest(
+                id = createRequestId(),
+                uuids = uuids.mapNotNull(::dashedUUID),
+                maxAge = maxAge
+            )
+        ) ?: return emptyMap()
+
+        return response.data.mapNotNull { (uuid, entry) -> normalizeUUID(uuid)?.let { it to entry } }.toMap()
+    }
+
+    suspend fun queryUuid(uuid: String, maxAge: Long = ProfileCacheService.maxAge) = queryUuids(listOf(uuid), maxAge)[normalizeUUID(uuid)]
+
+    private suspend inline fun <reified R: PartnerPacket> WebSocketSession.request(packet: PartnerPacket): R? {
+        val deferred = CompletableDeferred<PartnerPacket>()
+        pending[packet.id] = deferred
+
+        return try {
+            send(packet)
+            withTimeoutOrNull(timeoutMs) { deferred.await() } as? R
+        }
+        catch (_: Exception) {
+            null
+        }
+        finally {
+            pending.remove(packet.id)
+        }
+    }
+
+    private suspend fun WebSocketSession.send(packet: PartnerPacket) = send(Frame.Text(WebSocketPartnerRegistry.encode(packet)))
+    private fun createRequestId() = "req_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}"
 }
