@@ -1,22 +1,21 @@
 # Partner Cache Protocol
 
 A WebSocket protocol for sharing cached [Hypixel](https://api.hypixel.net) SkyBlock profile
-data between two independent backend services, so that both can reduce the use of thier
-Hypixel API key if the other side already has the profile cached.
+data between two independent backend services. When one side already has a profile cached,
+the other can get it from there and save a call on its own Hypixel API key.
 
 ## Why this exists
 
-Both services track SkyBlock player data and independently cache Hypixel's
-`/v2/skyblock/profiles` response per player. Since the two services often request the
-same players, most of that Hypixel traffic was
-duplicated: two servers, two API keys. both fetching the exact same JSON.
+Both services track SkyBlock player data and cache Hypixel's `/v2/skyblock/profiles`
+response per player. They often request the same players, so most of that Hypixel traffic
+was duplicated: two servers with two API keys, both fetching the exact same JSON.
 
-Rather than merging infrastructure, we built peer-to-peer layer on top of each service's
+Instead of merging infrastructure, we built a peer-to-peer layer on top of each service's
 existing cache:
 
 - Each side keeps caching exactly like it did before.
 - One side connects out to the other over a WebSocket and authenticates with a shared secret.
-- Either side can then ask the other "do you have this UUID cached?" and get back cached Hypixel response.
+- Either side can then ask the other "do you have this UUID cached?" and get back the cached Hypixel response.
 
 ## How it works
 
@@ -37,7 +36,7 @@ sequenceDiagram
     Note over C,S: server can also query the client the same way,<br/>using its own outgoing "In" packet
 ```
 
-Full wire format and semantics are documented in [`PROTOCOL.md`](./PROTOCOL.md).
+The full wire format is in [`PROTOCOL.md`](./PROTOCOL.md).
 
 ## Repo layout
 
@@ -50,15 +49,13 @@ PROTOCOL.md  Wire protocol specification
 
 ## Design decisions
 
-- **Raw response caching, not formatted output.** Lets both sides parse independently.
-Caching the **raw** response from Hypixel means the two sides don't need to agree on data shape, only on "what did
-Hypixel return for this UUID." Each service parses the raw JSON with its own existing logic.
+- **Cache the raw Hypixel response.** The two sides don't have to agree on a data shape,
+  only on what Hypixel returned for a UUID. Each service parses the raw JSON with its own
+  existing logic.
 
-
-- **Fetch time timestamps, not TTLs.** Each `Entry.timestamp` is the UTC time the data was
-  originally fetched from Hypixel, not "seconds remaining." This lets the receiving side apply
-  its own staleness rules instead of trusting the sender's cache policy.
-
+- **Fetch timestamps instead of TTLs.** Each `Entry.timestamp` is the UTC time the data was
+  originally fetched from Hypixel. The receiving side applies its own staleness rules and
+  doesn't have to trust the sender's cache policy.
 
 ## Authors
 
