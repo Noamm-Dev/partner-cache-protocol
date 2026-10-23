@@ -29,7 +29,8 @@ answer with a `301`.
   "t": 300,
   "id": "b3e1f2c0-...",
   "token": "shared-secret",       // present only for Auth (t=100)
-  "uuids": ["<uuid>", "..."]      // present only for Query (t=300)
+  "uuids": ["<uuid>", "..."],     // present only for Query (t=300)
+  "maxAge": 7200000               // optional, only for Query (t=300)
 }
 ```
 
@@ -39,6 +40,7 @@ answer with a `301`.
 | `id` | string | Correlation ID, unique per outstanding request. Echoed back in the response. |
 | `token` | string? | Shared secret, only sent with `Auth` |
 | `uuids` | string[]? | UUIDs being requested, only sent with `Query`. Dashed or undashed — normalize on receipt. |
+| `maxAge` | long? | Max age in milliseconds the requester accepts, only sent with `Query`. The responder must omit entries with `now - ts > maxAge`. If absent, the responder applies no limit beyond its own cache policy. |
 
 ### `Out` a response (Auth/Query result)
 
@@ -89,13 +91,15 @@ answer with a `301`.
 
 ## Query flow
 
-1. Requester sends `In { t: 300, id, uuids: [...] }`.
+1. Requester sends `In { t: 300, id, uuids: [...], maxAge? }`.
 2. Responder looks up each UUID in its own cache.
    - Only UUIDs that are actually cached are included in the response `data` map.
+   - If `maxAge` is set, entries fetched more than `maxAge` ms ago are left out, so stale
+     profiles aren't sent only to be discarded by the requester.
    - A UUID that's missing from `data` is treated as a cache miss by the requester.
 3. Responder replies `Out { t: 301, id, uuids, data }`, echoing the same `id`.
-4. Requester resolves the pending request keyed by `id` and applies its own staleness check (see
-   below) to each returned `Entry` before trusting it.
+4. Requester resolves the pending request keyed by `id` and applies its own staleness check to
+   each returned `Entry` before trusting it (a peer may not support `maxAge` yet).
 
 Either peer can be the requester. the same handler code processes an incoming `300` regardless
 of who established the connection.
